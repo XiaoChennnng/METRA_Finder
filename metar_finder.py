@@ -111,30 +111,33 @@ class METARParser:
         return final_desc if final_desc else code
 
     def parse_wind(self, wind_code, is_trend=False):
-        unit = 'KT' if 'KT' in wind_code or is_trend else 'MPS'
+        unit_str = '米/秒' if 'MPS' in wind_code else '节'
+
         if 'VRB' in wind_code:
-            speed = int(re.search(r'VRB(\d+)', wind_code).group(1))
-            return f'风向不定, 风速 {speed}{unit}'
-        direction = int(wind_code[0:3])
-        if 'KT' in wind_code:
-            speed = int(wind_code[3:5])
-            gust_match = re.search(r'G(\d+)', wind_code)
-            desc = f'风向 {direction}度, 风速 {speed}节'
-            if gust_match:
-                gust_speed = int(gust_match.group(1))
-                desc += f', 阵风 {gust_speed}节'
-            return desc
-        if 'MPS' in wind_code:
-            speed_mps = wind_code[4:]
-            speed_desc = '>99米/秒' if 'P99' in speed_mps else f'{int(speed_mps)}米/秒'
-            return f'风向 {direction}度, 风速 {speed_desc}'
-        if is_trend:
-            speed_match = re.search(r'(\d{2,3})(KT|MPS)', wind_code)
+            speed_match = re.search(r'VRB(\d{2,3})', wind_code)
             if speed_match:
                 speed = int(speed_match.group(1))
-                unit_str = '节' if speed_match.group(2) == 'KT' else '米/秒'
-                return f'风向 {direction}度, 风速 {speed}{unit_str}'
-        return wind_code
+                return f'风向不定, 风速 {speed}{unit_str}'
+            return wind_code  # 无法解析
+
+        # 匹配 风向/风速/阵风
+        match = re.match(r'(\d{3})(\d{2,3})(G\d{2,3})?', wind_code)
+        if not match:
+            return wind_code  # 无法解析则返回原始代码
+
+        direction_str = match.group(1)
+        speed = int(match.group(2))
+        gust_part = match.group(3)
+
+        if direction_str == '000' and speed == 0:
+            return '静风'
+
+        desc = f'风向 {direction_str}度, 风速 {speed}{unit_str}'
+        if gust_part:
+            gust_speed = int(gust_part[1:])  # 移除 'G'
+            desc += f', 阵风 {gust_speed}{unit_str}'
+
+        return desc
 
     def parse(self, metar_line):
         if not metar_line: return []
@@ -144,8 +147,7 @@ class METARParser:
             '云况': '', '温度/露点': '', '气压': '', '跑道视程': '',
             '趋势预报': '', '近期天气': '', '风切变': '', '备注': ''
         }
-        # The full parsing logic from the previous Tkinter app is integrated here.
-        # This method now returns a dictionary of parsed parts.
+
         # 场站
         station_match = re.search(r'^([A-Z]{4})', metar_line)
         if station_match: parts['场站'] = station_match.group(1)
@@ -155,32 +157,45 @@ class METARParser:
         if time_match: parts['观测时间'] = f'{time_match.group(1)}日 {time_match.group(2)}:{time_match.group(3)} UTC'
 
         # 风
-        wind_match = re.search(r' (\d{5}(G\d{2,3})?KT|VRB\d{2,3}KT|\d{3}P(99|\d{2})MPS) ', metar_line)
+        wind_match = re.search(r' ((\d{3}|VRB|00000KT)\d{2,3}(G\d{2,3})?(KT|MPS)) ',
+                               metar_line)
         if wind_match:
             wind_code = wind_match.group(1)
-            parts['风'] = f'{self.parse_wind(wind_code)} ({wind_code})'
+            # 针对静风的特殊处理
+            if wind_code == '00000KT':
+                parts['风'] = '静风 (00000KT)'
+            else:
+                parts['风'] = f'{self.parse_wind(wind_code)} ({wind_code})'
 
         # 能见度
         vis_match = re.search(r' (\d{4}) ', metar_line)
         if vis_match: parts['能见度'] = f'{vis_match.group(1)}米'
         elif 'CAVOK' in metar_line: parts['能见度'] = 'CAVOK (云和能见度都良好)'
 
-        # 天气现象
-        weather_match = re.search(r' ((-|\+)?(VC)?(MI|BC|PR|DR|BL|SH|TS|FZ)?([A-Z]{2}|[A-Z]{4})+?) ', metar_line)
+        # 天气现象 (改进正则，处理更复杂的情况)
+        weather_match = re.search(r' ((-|\+)?(VC)?(MI|BC|PR|DR|BL|SH|TS|FZ)?([A-Z]{2}){1,3}) ', metar_line)
         if weather_match:
             full_code = weather_match.group(1)
-            parts['天气现象'] = f'{self.translate_weather_phenomena(full_code)} ({full_code})'
+            # 避免将云码错误识别为天气现象
+            if full_code not in ['FEW', 'SCT', 'BKN', 'OVC', 'NSC']:
+                parts['天气现象'] = f'{self.translate_weather_phenomena(full_code)} ({full_code})'
 
         # 云
-        cloud_matches = re.findall(r' (FEW|SCT|BKN|OVC)(\d{3})(CB|TCU)?', metar_line)
+        cloud_matches = re.findall(r' (FEW|SCT|BKN|OVC|VV)(\d{3})(CB|TCU)?', metar_line)
         if cloud_matches:
-            cloud_info = ', '.join([
-                f'{self.translate_cloud_cover(c[0])} at {int(c[1])*100}英尺' + (f' ({c[2]})' if c[2] else '')
-                for c in cloud_matches
-            ])
-            parts['云况'] = cloud_info
+            cloud_info_parts = []
+            for c in cloud_matches:
+                if c[0] == 'VV':
+                    cloud_info_parts.append(f'垂直能见度 {int(c[1])*100}英尺')
+                else:
+                    cloud_info_parts.append(
+                        f'{self.translate_cloud_cover(c[0])} at {int(c[1])*100}英尺' + (f' ({c[2]})' if c[2] else '')
+                    )
+            parts['云况'] = ', '.join(cloud_info_parts)
         elif 'NSC' in metar_line:
             parts['云况'] = '无重要云 (NSC)'
+        elif 'NCD' in metar_line:
+            parts['云况'] = '无云 (NCD)'
 
         # 温度/露点
         temp_dew_match = re.search(r' (M?\d{2})/(M?\d{2}) ', metar_line)
@@ -199,19 +214,17 @@ class METARParser:
             rvr_info = ', '.join([f'跑道 {r[0]}: {r[1]}米' for r in rvr_matches])
             parts['跑道视程'] = rvr_info
 
-        # 趋势预报
-        trend_part_match = re.search(r' (NOSIG|BECMG.+$|TEMPO.+$)', metar_line)
+        # 趋势预报 
+        trend_part_match = re.search(r' (NOSIG|BECMG.*|TEMPO.*)', metar_line)
         if trend_part_match:
-            trend_part = trend_part_match.group(1).strip()
-            if 'NOSIG' in trend_part:
+            trend_full_string = trend_part_match.group(1).strip()
+            if 'NOSIG' in trend_full_string:
                 parts['趋势预报'] = '无显著变化 (NOSIG)'
             else:
-                trend_groups = re.split(r' (BECMG|TEMPO) ', ' ' + trend_part)[1:]
+                trend_blocks = re.findall(r'(BECMG|TEMPO)(.*?)(?=\sBECMG|\sTEMPO|$)', trend_full_string)
                 full_trend_desc = []
-                for i in range(0, len(trend_groups), 2):
-                    trend_type = trend_groups[i]
-                    trend_content = trend_groups[i+1].strip()
-                    details = self.parse_trend(trend_type, trend_content)
+                for trend_type, trend_content in trend_blocks:
+                    details = self.parse_trend(trend_type, trend_content.strip())
                     full_trend_desc.append('<br>'.join(details))
                 parts['趋势预报'] = '<br>'.join(full_trend_desc)
 
@@ -246,9 +259,9 @@ class METARParser:
             remaining_content = remaining_content.replace(time_match.group(0), '').strip()
 
         # 风
-        wind_match = re.search(r'(\d{5}G?\d{2,3}KT|VRB\d{2,3}KT|\d{5,8}MPS)', remaining_content)
+        wind_match = re.search(r'((\d{3}|VRB)\d{2,3}(G\d{2,3})?(KT|MPS))', remaining_content)
         if wind_match:
-            wind_code = wind_match.group(0)
+            wind_code = wind_match.group(1)
             details.append(f'- 风: {self.parse_wind(wind_code, is_trend=True)}')
             remaining_content = remaining_content.replace(wind_code, '').strip()
 
