@@ -1,6 +1,6 @@
 # METAR 实时解析工具
 
-这是一个快速查询和解析METAR报文的程序。
+这是一个快速查询和解析METAR报文的程序。由Haomin Chen和Shibo Yang共同开发
 
 ## ✨ 主要功能
 
